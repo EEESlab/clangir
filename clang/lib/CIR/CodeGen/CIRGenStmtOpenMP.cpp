@@ -12,6 +12,7 @@
 #include "clang/AST/ASTFwd.h"
 #include "clang/AST/StmtIterator.h"
 #include "clang/AST/StmtOpenMP.h"
+#include "clang/AST/ParentMapContext.h" //lucap: added for debug reason, to print ast parent nodes
 #include "clang/Basic/OpenMPKinds.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/Support/raw_ostream.h"
@@ -69,10 +70,16 @@ static void buildDependences(const OMPExecutableDirective &S,
   }
 }
 
+//===----------------------------------------------------------------------===//
+// emit Parallel Directive
+//===----------------------------------------------------------------------===//
+
 mlir::LogicalResult
 CIRGenFunction::emitOMPParallelDirective(const OMPParallelDirective &S) {
+
   mlir::LogicalResult res = mlir::success();
   auto scopeLoc = getLoc(S.getSourceRange());
+
   // Create a `omp.parallel` op.
   auto parallelOp = ParallelOp::create(builder, scopeLoc);
   mlir::Block &block = parallelOp.getRegion().emplaceBlock();
@@ -95,6 +102,10 @@ CIRGenFunction::emitOMPParallelDirective(const OMPParallelDirective &S) {
   return res;
 }
 
+//===----------------------------------------------------------------------===//
+// emit Task Directives
+//===----------------------------------------------------------------------===//
+
 mlir::LogicalResult
 CIRGenFunction::emitOMPTaskwaitDirective(const OMPTaskwaitDirective &S) {
   mlir::LogicalResult res = mlir::success();
@@ -114,6 +125,10 @@ CIRGenFunction::emitOMPTaskyieldDirective(const OMPTaskyieldDirective &S) {
   return res;
 }
 
+//===----------------------------------------------------------------------===//
+// emit Barrier Directive
+//===----------------------------------------------------------------------===//
+
 mlir::LogicalResult
 CIRGenFunction::emitOMPBarrierDirective(const OMPBarrierDirective &S) {
   mlir::LogicalResult res = mlir::success();
@@ -123,141 +138,61 @@ CIRGenFunction::emitOMPBarrierDirective(const OMPBarrierDirective &S) {
   return res;
 }
 
+
+//===----------------------------------------------------------------------===//
+// emit OMP For Directive
+//===----------------------------------------------------------------------===//
+
 // lucap: trying to implement OMP For Directive
-mlir::LogicalResult
-CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {
+// only emits the wsloop operation, the loop_nest will be emitted by visiting the ForStmt
+mlir::LogicalResult   // return value is like a boolean, but more explicit (success / failure)
+CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {   // pointer to Clang AST node
+
+  // default set return value as success
   mlir::LogicalResult res = mlir::success();
+
+  // retrieve metadata location of the Clang AST node
   auto scopeLoc = getLoc(S.getSourceRange());
 
-  // 4. Extract loop bounds from the AST
-    llvm::SmallVector<mlir::Value> lowerBounds, upperBounds, steps;   
-
-
-    
-    // Extract upper bound
-    if (auto *ubExpr = S.getUpperBoundVariable()) {
-      auto ub = emitScalarExpr(ubExpr);
-      upperBounds.push_back(ub);
-    }
-    
-    // Extract stride
-    if (auto *strideExpr = S.getStrideVariable()) {
-      auto stride = emitScalarExpr(strideExpr);
-      steps.push_back(stride);
-    }
-
-  // 1. Create the omp.wsloop operation
+  // Create a `omp.wsloop` op.
   auto wsloopOp = WsloopOp::create(builder, scopeLoc);
-  
-  // 2. Create a block inside wsloop's region and set insertion point there
-  mlir::Block *wsloopBlock = &wsloopOp.getRegion().emplaceBlock();
-  {
-    mlir::OpBuilder::InsertionGuard guard(builder);
-    builder.setInsertionPointToStart(wsloopBlock);
-    
-    // 3. CRITICAL: Emit the PreInits statement first
-    if (auto *preInits = cast_or_null<DeclStmt>(S.getPreInits())) {
-      if (emitStmt(preInits, /*useCurrentScope=*/true).failed()) {
-        return mlir::failure();
-      }
-    }
-    
-    // 4. Extract loop bounds from the AST
-    llvm::SmallVector<mlir::Value> lowerBounds, upperBounds, steps;   
 
-    // Extract lower bound
-    if (auto *lbExpr = S.getLowerBoundVariable()) {
-      llvm::errs() << "Found lower bound expression!\n" << lbExpr->getStmtClassName() << "\n";
-      //lbExpr -> dump();
-      auto lb = emitScalarExpr(lbExpr);
-      lowerBounds.push_back(lb);
-    }
-    
-    // Extract upper bound
-    if (auto *ubExpr = S.getUpperBoundVariable()) {
-      auto ub = emitScalarExpr(ubExpr);
-      upperBounds.push_back(ub);
-    }
-    
-    // Extract stride
-    if (auto *strideExpr = S.getStrideVariable()) {
-      auto stride = emitScalarExpr(strideExpr);
-      steps.push_back(stride);
-    }
-    
-    // 5. Create the omp.loop_nest operation
-    auto loopNestOp = LoopNestOp::create(
-        builder, 
-        scopeLoc,
-        /*collapse_num_loops=*/ 1,
-        /*loop_lower_bounds=*/ lowerBounds,
-        /*loop_upper_bounds=*/ upperBounds,
-        /*loop_steps=*/ steps,
-        /*loop_inclusive=*/ false,
-        /*tile_sizes=*/ nullptr
-    );
-    
-    // 6. Create a block inside loop_nest's region with the induction variable
-    mlir::Block *loopBodyBlock = &loopNestOp.getRegion().emplaceBlock();
-    auto indexTy = builder.getIndexType();
-    loopBodyBlock->addArgument(indexTy, scopeLoc);
-    
-    {
-      mlir::OpBuilder::InsertionGuard loopGuard(builder);
-      builder.setInsertionPointToStart(loopBodyBlock);
-      
-      // 7. Map the loop counter to the induction variable
-      mlir::Value inductionVar = loopBodyBlock->getArgument(0);
+  mlir::Block &block = wsloopOp.getRegion().emplaceBlock();
 
-      auto counters = S.counters();
-      if (!counters.empty()) {
-        if (auto *counterRef = dyn_cast<DeclRefExpr>(counters[0])) {
-          if (auto *varDecl = dyn_cast<VarDecl>(counterRef->getDecl())) {
-            
-            // Convert the Clang type to CIR type
-            auto counterType = convertType(varDecl->getType());
-            auto alignment = getContext().getTypeAlignInChars(varDecl->getType());
-            
-            // Convert alignment to IntegerAttr
-            auto alignmentAttr = builder.getI64IntegerAttr(alignment.getQuantity());
-            
-            // Compute pointer type
-            auto ptrType = cir::PointerType::get(builder.getContext(), counterType);
+  mlir::OpBuilder::InsertionGuard guardCase(builder);
+  builder.setInsertionPointToEnd(&block);
 
-            // Create an alloca for the counter
-            // Signature: create(OpBuilder &builder, Location location, Type addr, Type allocaType, StringRef name, IntegerAttr alignment)
-            auto alloca = cir::AllocaOp::create(
-                builder,
-                scopeLoc,
-                ptrType,           // addr (result type)
-                counterType,       // allocaType
-                varDecl->getName(),// name
-                alignmentAttr);    // alignment
-            
-            // Store the induction variable into the alloca
-            builder.create<cir::StoreOp>(scopeLoc, inductionVar, alloca);
-            
-            // Create an Address object and insert it into LocalDeclMap
-            Address counterAddr(alloca, counterType, alignment);
-            LocalDeclMap.insert({varDecl, counterAddr});
-          }
-        }
-      }
-      
-      // 8. Emit the loop body
-      if (emitStmt(S.getStructuredBlock(), /*useCurrentScope=*/true).failed()) {
+  // Create a scope for the OpenMP region.
+  cir::ScopeOp::create(
+      builder, scopeLoc, /*scopeBuilder=*/
+      [&](mlir::OpBuilder &b, mlir::Location loc) {
+        LexicalScope lexScope{*this, scopeLoc, builder.getInsertionBlock()};
+
+        // Emit the body of the region
+
+        // this works
+        if (emitStmt(S.getStructuredBlock(), /*useCurrentScope=*/true).failed())
+
+        // this also work, I do not know what changes
+        //if (emitStmt(S.getInnermostCapturedStmt()->getCapturedStmt(), /*useCurrentScope=*/true).failed())
+
+        // this give me error Clang AST for an OpenMP directive often has a specific set of Capture Regions associated with it, and OMPD_for might not be the one it's looking for in this specific context.
+        //if (emitStmt(S.getCapturedStmt(OpenMPDirectiveKind::OMPD_for)
+        //                 ->getCapturedStmt(),
+        //             /*useCurrentScope=*/true)
+        //        .failed())
         res = mlir::failure();
-      }
-      
-      // 9. Add omp.yield
-      mlir::omp::YieldOp::create(builder, getLoc(S.getSourceRange().getEnd()));
-    }
-  }
-  
+        
+      });
+
+  // omp.wsloop` does not require a yield or a terminator.
   return res;
 }
 
 
+//===----------------------------------------------------------------------===//
+// emit OMP Parallel For Directive
+//===----------------------------------------------------------------------===//
 
 // lucap: trying to implement OMP Parallel For Directive
 mlir::LogicalResult
