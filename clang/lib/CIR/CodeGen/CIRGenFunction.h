@@ -2363,6 +2363,11 @@ public:
   mlir::LogicalResult emitOMPParallelDirective(const OMPParallelDirective &S);
   mlir::LogicalResult emitOMPTaskwaitDirective(const OMPTaskwaitDirective &S);
   mlir::LogicalResult emitOMPTaskyieldDirective(const OMPTaskyieldDirective &S);
+  // lucap: added for OMPForDirective
+  mlir::LogicalResult emitOMPForDirective(const OMPForDirective &S);
+  // lucap: added for OMPParallelForDirective
+  mlir::LogicalResult emitOMPParallelForDirective(const OMPParallelForDirective &S);  
+
 
   LValue emitOpaqueValueLValue(const OpaqueValueExpr *e);
 

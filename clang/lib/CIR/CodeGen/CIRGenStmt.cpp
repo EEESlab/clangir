@@ -196,6 +196,10 @@ mlir::LogicalResult CIRGenFunction::emitStmt(const Stmt *S,
     return emitOMPBarrierDirective(cast<OMPBarrierDirective>(*S));
   case Stmt::IndirectGotoStmtClass:
     return emitIndirectGotoStmt(cast<IndirectGotoStmt>(*S));
+  case Stmt::OMPForDirectiveClass:  // lucap: trying to implement OMP For Directive
+    return emitOMPForDirective(cast<OMPForDirective>(*S));
+  case Stmt::OMPParallelForDirectiveClass:  // lucap: trying to implement OMP Parallel For Directive
+    return emitOMPParallelForDirective(cast<OMPParallelForDirective>(*S));
   // Unsupported AST nodes:
   case Stmt::CapturedStmtClass:
   case Stmt::ObjCAtTryStmtClass:
@@ -209,7 +213,6 @@ mlir::LogicalResult CIRGenFunction::emitStmt(const Stmt *S,
   case Stmt::OMPSimdDirectiveClass:
   case Stmt::OMPTileDirectiveClass:
   case Stmt::OMPUnrollDirectiveClass:
-  case Stmt::OMPForDirectiveClass:
   case Stmt::OMPForSimdDirectiveClass:
   case Stmt::OMPFuseDirectiveClass:
   case Stmt::OMPSectionsDirectiveClass:
@@ -217,7 +220,6 @@ mlir::LogicalResult CIRGenFunction::emitStmt(const Stmt *S,
   case Stmt::OMPSingleDirectiveClass:
   case Stmt::OMPMasterDirectiveClass:
   case Stmt::OMPCriticalDirectiveClass:
-  case Stmt::OMPParallelForDirectiveClass:
   case Stmt::OMPParallelForSimdDirectiveClass:
   case Stmt::OMPParallelMasterDirectiveClass:
   case Stmt::OMPParallelSectionsDirectiveClass:
