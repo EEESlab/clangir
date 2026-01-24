@@ -28,6 +28,10 @@
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/Dialect/OpenMP/OpenMPDialect.h"
 
+//lucap: added for omp loop_nest generation, to avoid using cir.value
+#include "mlir/Dialect/Arith/IR/Arith.h"
+
+
 using namespace clang;
 using namespace clang::CIRGen;
 using namespace cir;
@@ -1005,13 +1009,6 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
   llvm::errs() << "=== END DEBUG ===\n\n";
 
   llvm::errs() << "DEBUG: Entering FOR STMT\n";
-  
-  // ... rest of your code with the if (isOMPFor) logic
-
-
-
-
-
 
   // check if any parent is an OMPForDirective
   for (const auto &parent : parents) {
@@ -1054,7 +1051,13 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
             loopVar = dyn_cast<VarDecl>(DS->getSingleDecl());
             if (loopVar && loopVar->hasInit()) {
               // Emit the initialization value as lower bound
-              lowerBound = emitScalarExpr(loopVar->getInit());
+              //lowerBound = emitScalarExpr(loopVar->getInit());
+              // Try to evaluate as a constant
+              if (const auto *IL = dyn_cast<IntegerLiteral>(loopVar->getInit()->IgnoreImpCasts())) {
+                int64_t val = IL->getValue().getSExtValue();
+                // Create directly as index constant
+                lowerBound = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, val); 
+              }
             }
           }
         }
@@ -1067,8 +1070,13 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
       if (S.getCond()) {
         if (const auto *BO = dyn_cast<BinaryOperator>(S.getCond())) {
           // Get the RHS of the comparison as upper bound
-          upperBound = emitScalarExpr(BO->getRHS());
-          
+          //upperBound = emitScalarExpr(BO->getRHS()); not working since emit a cir.int that is not accepted by omp.loop_nest
+          // Try to evaluate RHS as a constant
+          if (const auto *IL = dyn_cast<IntegerLiteral>(BO->getRHS()->IgnoreImpCasts())) {
+            int64_t val = IL->getValue().getSExtValue();
+            upperBound = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, val);
+          } 
+
           // Check if comparison is inclusive (<= or >=) or exclusive (< or >)
           BinaryOperatorKind opKind = BO->getOpcode();
           if (opKind == BO_LE || opKind == BO_GE) {
@@ -1083,38 +1091,60 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
         if (const auto *UO = dyn_cast<UnaryOperator>(S.getInc())) {
           // i++ or ++i -> step = 1
           if (UO->isIncrementOp()) {
-            step = builder.create<cir::ConstantOp>(
-                scopeLoc, 
-                builder.getSInt32Ty(),
-                builder.getIntegerAttr(builder.getSInt32Ty(), 1));
+            step = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, 1);
+            //step = builder.create<cir::ConstantOp>(
+            //    scopeLoc, 
+            //    builder.getSInt32Ty(),
+            //    builder.getIntegerAttr(builder.getSInt32Ty(), 1));
           } else if (UO->isDecrementOp()) {
             // i-- or --i -> step = -1
-            step = builder.create<cir::ConstantOp>(
-                scopeLoc,
-                builder.getSInt32Ty(),
-                builder.getIntegerAttr(builder.getSInt32Ty(), -1));
+            step = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, -1);
+            //step = builder.create<cir::ConstantOp>(
+            //    scopeLoc,
+            //    builder.getSInt32Ty(),
+            //    builder.getIntegerAttr(builder.getSInt32Ty(), -1));
           }
         } else if (const auto *BO = dyn_cast<BinaryOperator>(S.getInc())) {
           // i += step or i = i + step
           if (BO->getOpcode() == BO_AddAssign || BO->getOpcode() == BO_Assign) {
-            step = emitScalarExpr(BO->getRHS());
+            //step = emitScalarExpr(BO->getRHS());
+            if (const auto *IL = dyn_cast<IntegerLiteral>(BO->getRHS()->IgnoreImpCasts())) {
+              int64_t val = IL->getValue().getSExtValue();
+              step = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, val);
+            }
           }
         }
       }
 
       // Default step to 1 if not found
       if (!step) {
-        step = builder.create<cir::ConstantOp>(
-            scopeLoc,
-            builder.getSInt32Ty(),
-            builder.getIntegerAttr(builder.getSInt32Ty(), 1));
+        step = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, 1);
+        //step = builder.create<cir::ConstantOp>(
+        //    scopeLoc,
+        //    builder.getSInt32Ty(),
+        //    builder.getIntegerAttr(builder.getSInt32Ty(), 1));
       }
       
+
+      // DEBUG PRINTS
       if(lowerBound) {
         llvm::errs() << "DEBUG: Lower Bound MLIR value: ";
         lowerBound.print(llvm::errs());
         llvm::errs() << "\n";
       }
+
+      if(upperBound) {
+        llvm::errs() << "DEBUG: Lower Bound MLIR value: ";
+        upperBound.print(llvm::errs());
+        llvm::errs() << "\n";
+      }
+
+      if(step) {
+        llvm::errs() << "DEBUG: Step MLIR value: ";
+        step.print(llvm::errs());
+        llvm::errs() << "\n";
+      }
+      // END DEBUG PRINTS
 
       // 4. Create arrays for loop_nest op (single loop for now)
       llvm::SmallVector<mlir::Value> lbs = {lowerBound};
@@ -1148,6 +1178,7 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
         if (emitStmt(S.getBody(), /*useCurrentScope=*/false).failed())
           loopRes = mlir::failure(); // Use loopRes instead of return
       }
+      
       
       // 8. Add terminator
       builder.create<mlir::omp::YieldOp>(getLoc(S.getEndLoc()));
