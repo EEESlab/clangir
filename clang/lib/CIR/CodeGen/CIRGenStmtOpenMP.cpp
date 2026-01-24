@@ -161,6 +161,36 @@ CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {   // pointer to 
   const CapturedStmt *CS = S.getInnermostCapturedStmt();
   const Stmt *forStmt = CS->getCapturedStmt(); // This is the ForStmt
 
+  const ForStmt *FS = dyn_cast<ForStmt>(CS->getCapturedStmt());
+
+  // --- NEW: HOIST CONSTANTS HERE ---
+  // The builder is currently OUTSIDE the wsloop. 
+  // We create the constants NOW so they dominate the loop.
+  
+  // TO FIX HERE: extract lowerBound, upperBound, step from ForStmt and then emit
+  mlir::Value lb, ub, step;
+  
+  if (FS) {
+    // Logic extracted from your emitForStmt:
+    // Handle Lower Bound
+    if (const auto *DS = dyn_cast<DeclStmt>(FS->getInit())) {
+        if (const auto *VD = dyn_cast<VarDecl>(DS->getSingleDecl())) {
+            if (const auto *IL = dyn_cast<IntegerLiteral>(VD->getInit()->IgnoreImpCasts())) {
+                lb = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, IL->getValue().getSExtValue());
+            }
+        }
+    }
+  }
+
+  // DEBUG PRINTS
+  if(lb) {
+    llvm::errs() << "DEBUG: Lower Bound MLIR value: ";
+    lb.print(llvm::errs());
+    llvm::errs() << "\n";
+  }
+
+
+
   // Create wsloop with empty parameters for now
   auto wsloopOp = builder.create<mlir::omp::WsloopOp>(
       scopeLoc,
@@ -197,6 +227,11 @@ CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {   // pointer to 
   if (emitStmt(forStmt, /*useCurrentScope=*/false).failed()) {
     res = mlir::failure();
   }
+
+  // DEBUG: Print the wsloop operation to see what was generated
+  llvm::errs() << "=== Generated wsloop operation ===\n";
+  wsloopOp.dump();
+  llvm::errs() << "=== End of wsloop ===\n";
 
 
 

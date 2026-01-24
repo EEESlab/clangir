@@ -953,7 +953,6 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
   cir::ForOp forOp;
   auto scopeLoc = getLoc(S.getSourceRange()); // Move this up - needed in isOMPFor block
 
-
   // Check if parent is an OpenMP for directive
   bool isOMPFor = false;
   auto &astContext = getContext();//.getASTContext();
@@ -1023,10 +1022,15 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
   // TODO: pass in array of attributes.
   auto forStmtBuilder = [&]() -> mlir::LogicalResult {
     auto loopRes = mlir::success();
-    // Evaluate the first part before the loop.
-    if (S.getInit())
-      if (emitStmt(S.getInit(), /*useCurrentScope=*/true).failed())
-        return mlir::failure();
+
+    // Only emit init for non-OpenMP loops 
+    if(!isOMPFor) {
+      // Evaluate the first part before the loop.
+      if (S.getInit())
+        if (emitStmt(S.getInit(), /*useCurrentScope=*/true).failed())
+          return mlir::failure();
+    }
+
     assert(!cir::MissingFeatures::loopInfoStack());
     // From LLVM: if there are any cleanups between here and the loop-exit
     // scope, create a block to stage a loop exit along.
@@ -1043,6 +1047,8 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
       
       // 1. Get the loop variable from init statement
       const VarDecl *loopVar = nullptr;
+
+      // TO FIX: lb, ub and step should not be emitted here but before wsloop
       mlir::Value lowerBound;
 
       if (S.getInit()) {
@@ -1134,7 +1140,7 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
       }
 
       if(upperBound) {
-        llvm::errs() << "DEBUG: Lower Bound MLIR value: ";
+        llvm::errs() << "DEBUG: Upper Bound MLIR value: ";
         upperBound.print(llvm::errs());
         llvm::errs() << "\n";
       }
@@ -1183,6 +1189,11 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
       // 8. Add terminator
       builder.create<mlir::omp::YieldOp>(getLoc(S.getEndLoc()));
 
+      // DEBUG: Print what we just created
+      llvm::errs() << "=== Generated loop_nest ===\n";
+      loopNestOp.dump();
+      llvm::errs() << "=== End loop_nest ===\n";
+
     } else {  // isOMPFor == false
 
       llvm::errs() << "DEBUG: Entering standard CIR loop path (cir.for)\n";
@@ -1227,13 +1238,27 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
     return loopRes;
   };
 
-  auto res = mlir::success();
-  cir::ScopeOp::create(builder, scopeLoc, /*scopeBuilder=*/
-                       [&](mlir::OpBuilder &b, mlir::Location loc) {
-                         LexicalScope lexScope{*this, loc,
-                                               builder.getInsertionBlock()};
-                         res = forStmtBuilder();
-                       });
+  auto res = mlir::success(); 
+
+  if (isOMPFor) {
+    res = forStmtBuilder();
+  } else {
+    cir::ScopeOp::create(builder, scopeLoc, /*scopeBuilder=*/
+                          [&](mlir::OpBuilder &b, mlir::Location loc) {
+                            LexicalScope lexScope{*this, loc,
+                                                  builder.getInsertionBlock()};
+                            res = forStmtBuilder();
+                          });
+}
+
+  // that's a problem for the emission of omp.loop_nest since we do not want cir.scope in the way
+  // MOVED UP inside a if block for that reason
+  //cir::ScopeOp::create(builder, scopeLoc, /*scopeBuilder=*/
+  //                     [&](mlir::OpBuilder &b, mlir::Location loc) {
+  //                       LexicalScope lexScope{*this, loc,
+  //                                             builder.getInsertionBlock()};
+  //                       res = forStmtBuilder();
+  //                     });
 
   if (res.failed())
     return res;
