@@ -25,6 +25,7 @@
 //lucap: included below added for omp loop_nest generation
 #include "clang/AST/StmtOpenMP.h"
 #include "clang/Basic/OpenMPKinds.h"
+#include "llvm/Support/raw_ostream.h"
 #include "mlir/Dialect/OpenMP/OpenMPDialect.h"
 
 using namespace clang;
@@ -948,17 +949,79 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
   cir::ForOp forOp;
   auto scopeLoc = getLoc(S.getSourceRange()); // Move this up - needed in isOMPFor block
 
+
   // Check if parent is an OpenMP for directive
   bool isOMPFor = false;
   auto &astContext = getContext();//.getASTContext();
   auto &parentMapContext = astContext.getParentMapContext();
   auto parents = parentMapContext.getParents(S);
+;
+
+  llvm::errs() << "=== DEBUG ForStmt ===\n";
+
+  llvm::errs() << "Number of parents: " << parents.size() << "\n";
+  
+  if (!parents.empty()) {
+    // Parent is CapturedDecl
+    if (const auto *CD = parents[0].get<CapturedDecl>()) {
+      llvm::errs() << "Parent is CapturedDecl\n";
+      
+      // Now we need to find the CapturedStmt that uses this CapturedDecl
+      // The CapturedDecl doesn't have parents in the normal sense
+      // Instead, we need to check who's using it
+      
+      // Try getting parents of the CapturedDecl
+      auto declParents = parentMapContext.getParents(*CD);
+      llvm::errs() << "CapturedDecl has " << declParents.size() << " parents\n";
+      
+      for (const auto &dp : declParents) {
+        if (const auto *stmt = dp.get<clang::Stmt>()) {
+          llvm::errs() << "CapturedDecl parent Stmt: " << stmt->getStmtClassName() << "\n";
+          
+          // Check if it's a CapturedStmt
+          if (const auto *CS = dyn_cast<CapturedStmt>(stmt)) {
+            llvm::errs() << "Found CapturedStmt, checking ITS parents\n";
+            
+            // Now check parents of CapturedStmt
+            auto csParents = parentMapContext.getParents(*CS);
+            for (const auto &csp : csParents) {
+              if (const auto *parentStmt = csp.get<clang::Stmt>()) {
+                llvm::errs() << "CapturedStmt parent: " << parentStmt->getStmtClassName() << "\n";
+                
+                if (isa<OMPForDirective>(parentStmt)) {
+                  llvm::errs() << "*** FOUND OMPForDirective! ***\n";
+                  isOMPFor = true;
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  llvm::errs() << "isOMPFor = " << isOMPFor << "\n";
+  llvm::errs() << "=== END DEBUG ===\n\n";
+
+  llvm::errs() << "DEBUG: Entering FOR STMT\n";
+  
+  // ... rest of your code with the if (isOMPFor) logic
+
+
+
+
+
+
+  // check if any parent is an OMPForDirective
   for (const auto &parent : parents) {
     if (parent.get<OMPForDirective>()) {
       isOMPFor = true;
       break;
     }
   }
+
+  llvm::errs() << "DEBUG: Entering FOR STMT\n";
   
   // TODO: pass in array of attributes.
   auto forStmtBuilder = [&]() -> mlir::LogicalResult {
@@ -976,6 +1039,7 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
 
     if(isOMPFor) {
       // Emit OpenMP loop nest instead of regular for loop
+      llvm::errs() << "DEBUG: Entering OpenMP loop path (omp.loop_nest)\n";
   
       // Extract loop information from ForStmt
       // We need to analyze the init, condition, and increment to extract bounds
@@ -1046,6 +1110,12 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
             builder.getIntegerAttr(builder.getSInt32Ty(), 1));
       }
       
+      if(lowerBound) {
+        llvm::errs() << "DEBUG: Lower Bound MLIR value: ";
+        lowerBound.print(llvm::errs());
+        llvm::errs() << "\n";
+      }
+
       // 4. Create arrays for loop_nest op (single loop for now)
       llvm::SmallVector<mlir::Value> lbs = {lowerBound};
       llvm::SmallVector<mlir::Value> ubs = {upperBound};
@@ -1083,6 +1153,8 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
       builder.create<mlir::omp::YieldOp>(getLoc(S.getEndLoc()));
 
     } else {  // isOMPFor == false
+
+      llvm::errs() << "DEBUG: Entering standard CIR loop path (cir.for)\n";
       // Regular CIR for loop
       forOp = builder.createFor(
           getLoc(S.getSourceRange()),

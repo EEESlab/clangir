@@ -148,30 +148,78 @@ CIRGenFunction::emitOMPBarrierDirective(const OMPBarrierDirective &S) {
 mlir::LogicalResult   // return value is like a boolean, but more explicit (success / failure)
 CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {   // pointer to Clang AST node
 
+  // THIS FIRST PART it's CORRECT
   // default set return value as success
   mlir::LogicalResult res = mlir::success();
-
   // retrieve metadata location of the Clang AST node
   auto scopeLoc = getLoc(S.getSourceRange());
+  llvm::errs() << "DEBUG: creating omp.wsloop op\n";
 
+  // BUILD APPROACH - testing
+
+  // Get the ForStmt - use getInnermostCapturedStmt() instead
+  const CapturedStmt *CS = S.getInnermostCapturedStmt();
+  const Stmt *forStmt = CS->getCapturedStmt(); // This is the ForStmt
+
+  // Create wsloop with empty parameters for now
+  auto wsloopOp = builder.create<mlir::omp::WsloopOp>(
+      scopeLoc,
+      /*allocate_vars=*/mlir::ValueRange{},
+      /*allocator_vars=*/mlir::ValueRange{},
+      /*linear_vars=*/mlir::ValueRange{},
+      /*linear_step_vars=*/mlir::ValueRange{},
+      /*nowait=*/false,
+      /*order=*/nullptr,
+      /*order_mod=*/nullptr,
+      /*ordered=*/nullptr,
+      /*private_vars=*/mlir::ValueRange{},
+      /*private_syms=*/nullptr,
+      /*private_needs_barrier=*/false,
+      /*reduction_mod=*/nullptr,
+      /*reduction_vars=*/mlir::ValueRange{},
+      /*reduction_byref=*/nullptr,
+      /*reduction_syms=*/nullptr,
+      /*schedule_kind=*/nullptr,
+      /*schedule_chunk=*/nullptr,
+      /*schedule_mod=*/nullptr,
+      /*schedule_simd=*/false
+  );
+
+  // Populate the region with the ForStmt
+  mlir::Region &region = wsloopOp.getRegion();
+  mlir::Block *block = new mlir::Block();
+  region.push_back(block);
+  
+  mlir::OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToStart(block);
+  
+  // Emit the ForStmt inside the wsloop region
+  if (emitStmt(forStmt, /*useCurrentScope=*/false).failed()) {
+    res = mlir::failure();
+  }
+
+
+
+
+  // CREATE APPROACH - getting error since it verifies that the region is empty
   // Create a `omp.wsloop` op.
-  auto wsloopOp = WsloopOp::create(builder, scopeLoc);
+  //auto wsloopOp = WsloopOp::create(builder, scopeLoc);
 
-  mlir::Block &block = wsloopOp.getRegion().emplaceBlock();
+  //mlir::Block &block = wsloopOp.getRegion().emplaceBlock();
 
-  mlir::OpBuilder::InsertionGuard guardCase(builder);
-  builder.setInsertionPointToEnd(&block);
+  //mlir::OpBuilder::InsertionGuard guardCase(builder);
+  //builder.setInsertionPointToEnd(&block);
 
   // Create a scope for the OpenMP region.
-  cir::ScopeOp::create(
-      builder, scopeLoc, /*scopeBuilder=*/
-      [&](mlir::OpBuilder &b, mlir::Location loc) {
-        LexicalScope lexScope{*this, scopeLoc, builder.getInsertionBlock()};
+  //cir::ScopeOp::create(
+  //    builder, scopeLoc, /*scopeBuilder=*/
+  //    [&](mlir::OpBuilder &b, mlir::Location loc) {
+  //      LexicalScope lexScope{*this, scopeLoc, builder.getInsertionBlock()};
 
         // Emit the body of the region
 
         // this works
-        if (emitStmt(S.getStructuredBlock(), /*useCurrentScope=*/true).failed())
+  //      if (emitStmt(S.getStructuredBlock(), /*useCurrentScope=*/true).failed())
 
         // this also work, I do not know what changes
         //if (emitStmt(S.getInnermostCapturedStmt()->getCapturedStmt(), /*useCurrentScope=*/true).failed())
@@ -181,9 +229,9 @@ CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {   // pointer to 
         //                 ->getCapturedStmt(),
         //             /*useCurrentScope=*/true)
         //        .failed())
-        res = mlir::failure();
+  //      res = mlir::failure();
         
-      });
+  //    });
 
   // omp.wsloop` does not require a yield or a terminator.
   return res;
