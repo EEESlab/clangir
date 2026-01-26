@@ -1047,124 +1047,26 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
       
       // 1. Get the loop variable from init statement
       const VarDecl *loopVar = nullptr;
+      mlir::Value lowerBound, upperBound, step;
+      bool inclusive;
 
-      // TO FIX: lb, ub and step should not be emitted here but before wsloop
-      mlir::Value lowerBound;
-
-      if (S.getInit()) {
-        if (const auto *DS = dyn_cast<DeclStmt>(S.getInit())) {
-          if (DS->isSingleDecl()) {
-            loopVar = dyn_cast<VarDecl>(DS->getSingleDecl());
-            if (loopVar && loopVar->hasInit()) {
-              // Emit the initialization value as lower bound
-              //lowerBound = emitScalarExpr(loopVar->getInit());
-              // Try to evaluate as a constant
-              if (const auto *IL = dyn_cast<IntegerLiteral>(loopVar->getInit()->IgnoreImpCasts())) {
-                int64_t val = IL->getValue().getSExtValue();
-                // Create directly as index constant
-                lowerBound = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, val); 
-              }
-            }
-          }
-        }
-      } // Added missing closing brace
-
-      // 2. Get upper bound from condition (e.g., i < N)
-      mlir::Value upperBound;
-      bool inclusive = false;
-
-      if (S.getCond()) {
-        if (const auto *BO = dyn_cast<BinaryOperator>(S.getCond())) {
-          // Get the RHS of the comparison as upper bound
-          //upperBound = emitScalarExpr(BO->getRHS()); not working since emit a cir.int that is not accepted by omp.loop_nest
-          // Try to evaluate RHS as a constant
-          if (const auto *IL = dyn_cast<IntegerLiteral>(BO->getRHS()->IgnoreImpCasts())) {
-            int64_t val = IL->getValue().getSExtValue();
-            upperBound = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, val);
-          } 
-
-          // Check if comparison is inclusive (<= or >=) or exclusive (< or >)
-          BinaryOperatorKind opKind = BO->getOpcode();
-          if (opKind == BO_LE || opKind == BO_GE) {
-            inclusive = true;
-          }
-        }
+      if(currentOMPLoopBounds) {
+        lowerBound = currentOMPLoopBounds->lowerBound;
+        upperBound = currentOMPLoopBounds->upperBound;
+        step = currentOMPLoopBounds->step;
+        inclusive  = currentOMPLoopBounds->inclusive;
+      } else {
+        llvm::errs() << "DEBUG: ERROR in extracting loop bounds\n";
       }
-      
-      // 3. Get step from increment (e.g., i++, i+=2)
-      mlir::Value step;
-      if (S.getInc()) {
-        if (const auto *UO = dyn_cast<UnaryOperator>(S.getInc())) {
-          // i++ or ++i -> step = 1
-          if (UO->isIncrementOp()) {
-            step = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, 1);
-            //step = builder.create<cir::ConstantOp>(
-            //    scopeLoc, 
-            //    builder.getSInt32Ty(),
-            //    builder.getIntegerAttr(builder.getSInt32Ty(), 1));
-          } else if (UO->isDecrementOp()) {
-            // i-- or --i -> step = -1
-            step = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, -1);
-            //step = builder.create<cir::ConstantOp>(
-            //    scopeLoc,
-            //    builder.getSInt32Ty(),
-            //    builder.getIntegerAttr(builder.getSInt32Ty(), -1));
-          }
-        } else if (const auto *BO = dyn_cast<BinaryOperator>(S.getInc())) {
-          // i += step or i = i + step
-          if (BO->getOpcode() == BO_AddAssign || BO->getOpcode() == BO_Assign) {
-            //step = emitScalarExpr(BO->getRHS());
-            if (const auto *IL = dyn_cast<IntegerLiteral>(BO->getRHS()->IgnoreImpCasts())) {
-              int64_t val = IL->getValue().getSExtValue();
-              step = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, val);
-            }
-          }
-        }
-      }
-
-      // Default step to 1 if not found
-      if (!step) {
-        step = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, 1);
-        //step = builder.create<cir::ConstantOp>(
-        //    scopeLoc,
-        //    builder.getSInt32Ty(),
-        //    builder.getIntegerAttr(builder.getSInt32Ty(), 1));
-      }
-      
-
-      // DEBUG PRINTS
-      if(lowerBound) {
-        llvm::errs() << "DEBUG: Lower Bound MLIR value: ";
-        lowerBound.print(llvm::errs());
-        llvm::errs() << "\n";
-      }
-
-      if(upperBound) {
-        llvm::errs() << "DEBUG: Upper Bound MLIR value: ";
-        upperBound.print(llvm::errs());
-        llvm::errs() << "\n";
-      }
-
-      if(step) {
-        llvm::errs() << "DEBUG: Step MLIR value: ";
-        step.print(llvm::errs());
-        llvm::errs() << "\n";
-      }
-      // END DEBUG PRINTS
-
-      // 4. Create arrays for loop_nest op (single loop for now)
-      llvm::SmallVector<mlir::Value> lbs = {lowerBound};
-      llvm::SmallVector<mlir::Value> ubs = {upperBound};
-      llvm::SmallVector<mlir::Value> steps = {step};
       
       // 5. Create the loop_nest operation
       auto loopNestOp = mlir::omp::LoopNestOp::create(
             builder,
             scopeLoc,
             /*numLoops=*/1,
-            lbs,
-            ubs,
-            steps,
+            lowerBound,
+            upperBound,
+            step,
             inclusive,
             /*loopVarTypes=*/nullptr);
       
@@ -1190,9 +1092,11 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
       builder.create<mlir::omp::YieldOp>(getLoc(S.getEndLoc()));
 
       // DEBUG: Print what we just created
+      /*
       llvm::errs() << "=== Generated loop_nest ===\n";
       loopNestOp.dump();
       llvm::errs() << "=== End loop_nest ===\n";
+      */
 
     } else {  // isOMPFor == false
 
