@@ -148,26 +148,19 @@ CIRGenFunction::emitOMPBarrierDirective(const OMPBarrierDirective &S) {
 mlir::LogicalResult   // return value is like a boolean, but more explicit (success / failure)
 CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {   // pointer to Clang AST node
 
-  // THIS FIRST PART it's CORRECT
   // default set return value as success
   mlir::LogicalResult res = mlir::success();
   // retrieve metadata location of the Clang AST node
   auto scopeLoc = getLoc(S.getSourceRange());
   llvm::errs() << "DEBUG: creating omp.wsloop op\n";
 
-  // BUILD APPROACH - testing
-
   // Get the ForStmt - use getInnermostCapturedStmt() instead
   const CapturedStmt *CS = S.getInnermostCapturedStmt();
-  //const Stmt *forStmt = CS->getCapturedStmt(); // This is the ForStmt
-
   const ForStmt *FS = dyn_cast<ForStmt>(CS->getCapturedStmt());
 
   // --- NEW: HOIST CONSTANTS HERE ---
   // The builder is currently OUTSIDE the wsloop. 
   // We create the constants NOW so they dominate the loop.
-  
-  // TO FIX HERE: extract lowerBound, upperBound, step from ForStmt and then emit
   mlir::Value lowerBound, upperBound, step;
   bool inclusive = false;
   
@@ -182,13 +175,12 @@ CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {   // pointer to 
     }
 
 
-    // Handle Upper Bound
-    // inclusive is necessary in forStmt when emitting loop_nest, so I don't know if keeping it here
+    // Handle Upper Bound and inclusive
     if (FS->getCond()) {
         if (const auto *BO = dyn_cast<BinaryOperator>(FS->getCond())) {
           // Get the RHS of the comparison as upper bound
-          //upperBound = emitScalarExpr(BO->getRHS()); not working since emit a cir.int that is not accepted by omp.loop_nest
-          // Try to evaluate RHS as a constant
+          // upperBound = emitScalarExpr(BO->getRHS()); not working since emit a cir.int that is not accepted by omp.loop_nest
+          // While it works evaluating RHS as a constant (same thing for LB and step)
           if (const auto *IL = dyn_cast<IntegerLiteral>(BO->getRHS()->IgnoreImpCasts())) {
             int64_t val = IL->getValue().getSExtValue();
             upperBound = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, val);
@@ -209,22 +201,13 @@ CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {   // pointer to 
         // i++ or ++i -> step = 1
         if (UO->isIncrementOp()) {
           step = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, 1);
-          //step = builder.create<cir::ConstantOp>(
-          //    scopeLoc, 
-          //    builder.getSInt32Ty(),
-          //    builder.getIntegerAttr(builder.getSInt32Ty(), 1));
         } else if (UO->isDecrementOp()) {
           // i-- or --i -> step = -1
           step = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, -1);
-          //step = builder.create<cir::ConstantOp>(
-          //    scopeLoc,
-          //    builder.getSInt32Ty(),
-          //    builder.getIntegerAttr(builder.getSInt32Ty(), -1));
         }
       } else if (const auto *BO = dyn_cast<BinaryOperator>(FS->getInc())) {
         // i += step or i = i + step
         if (BO->getOpcode() == BO_AddAssign || BO->getOpcode() == BO_Assign) {
-          //step = emitScalarExpr(BO->getRHS());
           if (const auto *IL = dyn_cast<IntegerLiteral>(BO->getRHS()->IgnoreImpCasts())) {
             int64_t val = IL->getValue().getSExtValue();
             step = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, val);
@@ -236,48 +219,11 @@ CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {   // pointer to 
     // Default step to 1 if not found
     if (!step) {
       step = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, 1);
-      //step = builder.create<cir::ConstantOp>(
-      //    scopeLoc,
-      //    builder.getSInt32Ty(),
-      //    builder.getIntegerAttr(builder.getSInt32Ty(), 1));
     }
-  }  
+  } 
 
-  // DEBUG PRINTS
-  if(lowerBound) {
-    llvm::errs() << "DEBUG: Lower Bound MLIR value: ";
-    lowerBound.print(llvm::errs());
-    llvm::errs() << "\n";
-  }
-
-  if(upperBound) {
-    llvm::errs() << "DEBUG: Upper Bound MLIR value: ";
-    upperBound.print(llvm::errs());
-    llvm::errs() << "\n";
-  }
-
-  if(step) {
-    llvm::errs() << "DEBUG: Step MLIR value: ";
-    step.print(llvm::errs());
-    llvm::errs() << "\n";
-  }
-  // END DEBUG PRINTS
-
-  // After creating lowerBound, upperBound, step:
+  // populate a struct that will be passed to emitForStmt (loop_nest)
   currentOMPLoopBounds = LoopBounds{lowerBound, upperBound, step, inclusive};
-
-
-  // DUMP THE CURRENT MODULE TO SEE WHERE THESE CONSTANTS ARE
-  llvm::errs() << "=== Current function BEFORE creating wsloop ===\n";
-  //builder.getInsertionBlock()->getParentOp()->dump();
-  // This prints the entire MLIR module being generated
-  CGM.getModule().dump();
-  llvm::errs() << "=== End function dump ===\n";
-
-  // Print where we're inserting
-  llvm::errs() << "DEBUG: Current insertion block has " 
-             << builder.getInsertionBlock()->getOperations().size() 
-             << " operations\n";
 
   // Create wsloop with empty parameters for now
   auto wsloopOp = builder.create<mlir::omp::WsloopOp>(
@@ -303,9 +249,6 @@ CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {   // pointer to 
       /*schedule_simd=*/false
   );
 
-  llvm::errs() << "DEBUG: After wsloop creation, block has " 
-             << builder.getInsertionBlock()->getOperations().size() 
-             << " operations\n";
 
   // Populate the region with the ForStmt
   mlir::Region &region = wsloopOp.getRegion();
@@ -314,72 +257,13 @@ CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {   // pointer to 
   
   mlir::OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToStart(block);
-  
-  // Emit the ForStmt inside the wsloop region
-  //if (emitStmt(forStmt, /*useCurrentScope=*/false).failed()) {
-  //  res = mlir::failure();
-  //}
 
   if (emitStmt(FS, /*useCurrentScope=*/false).failed()) {
     res = mlir::failure();
   }
 
-  // DEBUG: Print the wsloop operation to see what was generated
-  llvm::errs() << "=== Generated LB ===\n";
-  lowerBound.dump();
-  llvm::errs() << "=== End of LB ===\n";
-
-  // DEBUG: Print the wsloop operation to see what was generated
-  llvm::errs() << "=== Generated wsloop operation ===\n";
-  wsloopOp.dump();
-  llvm::errs() << "=== End of wsloop ===\n";
-
-
-  llvm::errs() << "=== ForStmt AST ===\n";
-  FS->dump();
-  llvm::errs() << "=== End ForStmt AST ===\n";
-
-    // DUMP THE CURRENT MODULE TO SEE WHERE THESE CONSTANTS ARE
-  llvm::errs() << "=== Current function BEFORE creating wsloop ===\n";
-  //builder.getInsertionBlock()->getParentOp()->dump();
-  // This prints the entire MLIR module being generated
-  CGM.getModule().dump();
-  llvm::errs() << "=== End function dump ===\n";
-
   // After emitStmt:
   currentOMPLoopBounds = std::nullopt; // Clear
-
-  // CREATE APPROACH - getting error since it verifies that the region is empty
-  // Create a `omp.wsloop` op.
-  //auto wsloopOp = WsloopOp::create(builder, scopeLoc);
-
-  //mlir::Block &block = wsloopOp.getRegion().emplaceBlock();
-
-  //mlir::OpBuilder::InsertionGuard guardCase(builder);
-  //builder.setInsertionPointToEnd(&block);
-
-  // Create a scope for the OpenMP region.
-  //cir::ScopeOp::create(
-  //    builder, scopeLoc, /*scopeBuilder=*/
-  //    [&](mlir::OpBuilder &b, mlir::Location loc) {
-  //      LexicalScope lexScope{*this, scopeLoc, builder.getInsertionBlock()};
-
-        // Emit the body of the region
-
-        // this works
-  //      if (emitStmt(S.getStructuredBlock(), /*useCurrentScope=*/true).failed())
-
-        // this also work, I do not know what changes
-        //if (emitStmt(S.getInnermostCapturedStmt()->getCapturedStmt(), /*useCurrentScope=*/true).failed())
-
-        // this give me error Clang AST for an OpenMP directive often has a specific set of Capture Regions associated with it, and OMPD_for might not be the one it's looking for in this specific context.
-        //if (emitStmt(S.getCapturedStmt(OpenMPDirectiveKind::OMPD_for)
-        //                 ->getCapturedStmt(),
-        //             /*useCurrentScope=*/true)
-        //        .failed())
-  //      res = mlir::failure();
-        
-  //    });
 
   // omp.wsloop` does not require a yield or a terminator.
   return res;

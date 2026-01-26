@@ -15,6 +15,7 @@
 #include "CIRGenFunction.h"
 #include "mlir/IR/Value.h"
 #include "clang/AST/CharUnits.h"
+#include "clang/AST/Comment.h"
 #include "clang/AST/Stmt.h"
 #include "clang/AST/ParentMapContext.h" //lucap: added for debug reason, to print ast parent nodes
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
@@ -27,6 +28,8 @@
 #include "clang/Basic/OpenMPKinds.h"
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/Dialect/OpenMP/OpenMPDialect.h"
+#include "mlir/IR/Block.h"
+#include "mlir/IR/Builders.h"
 
 //lucap: added for omp loop_nest generation, to avoid using cir.value
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -951,6 +954,8 @@ CIRGenFunction::emitCXXForRangeStmt(const CXXForRangeStmt &S,
 //lucap: trying to modify this in a way that if is contained in a omp.wsloop (the father is a OMPForDirective) then emit omp.loop_nest instead of a cir.for
 mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
   cir::ForOp forOp;
+  mlir::omp::LoopNestOp loopNestOp;
+
   auto scopeLoc = getLoc(S.getSourceRange()); // Move this up - needed in isOMPFor block
 
   // Check if parent is an OpenMP for directive
@@ -960,9 +965,8 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
   auto parents = parentMapContext.getParents(S);
 ;
 
+/**/
   llvm::errs() << "=== DEBUG ForStmt ===\n";
-
-  llvm::errs() << "Number of parents: " << parents.size() << "\n";
   
   if (!parents.empty()) {
     // Parent is CapturedDecl
@@ -1009,15 +1013,6 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
 
   llvm::errs() << "DEBUG: Entering FOR STMT\n";
 
-  // check if any parent is an OMPForDirective
-  for (const auto &parent : parents) {
-    if (parent.get<OMPForDirective>()) {
-      isOMPFor = true;
-      break;
-    }
-  }
-
-  llvm::errs() << "DEBUG: Entering FOR STMT\n";
   
   // TODO: pass in array of attributes.
   auto forStmtBuilder = [&]() -> mlir::LogicalResult {
@@ -1041,6 +1036,9 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
     if(isOMPFor) {
       // Emit OpenMP loop nest instead of regular for loop
       llvm::errs() << "DEBUG: Entering OpenMP loop path (omp.loop_nest)\n";
+
+      // ensure we use a local insertion guard
+      mlir::OpBuilder::InsertionGuard guard(builder);
   
       // Extract loop information from ForStmt
       // We need to analyze the init, condition, and increment to extract bounds
@@ -1060,7 +1058,7 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
       }
       
       // 5. Create the loop_nest operation
-      auto loopNestOp = mlir::omp::LoopNestOp::create(
+      loopNestOp = loopNestOp.create(
             builder,
             scopeLoc,
             /*numLoops=*/1,
@@ -1070,33 +1068,43 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
             inclusive,
             /*loopVarTypes=*/nullptr);
       
+      
+      // debug to undersand where is the error
+      assert(loopNestOp->getNumRegions() == 0 ||
+      llvm::all_of(loopNestOp->getRegions(),
+                    [](mlir::Region &r) { return r.getParentOp(); }));      
+
+      // ---- debug: make sure op is inserted ----
+      if (!loopNestOp.getOperation()->getParentOp()) {
+        // If this is ever printed, it means the op was not inserted; insert it now.
+        llvm::errs() << "WARNING: loopNestOp not parented; inserting explicitly\n";
+        builder.insert(loopNestOp.getOperation());
+      }
+      assert(loopNestOp.getOperation()->getParentOp() && "loopNestOp must be parented before touching region");
+
+
       // 6. Get the region and create a block
       mlir::Region &region = loopNestOp.getRegion();
-      mlir::Block &block = region.emplaceBlock();
+      mlir::Block *block = new mlir::Block();
+      region.push_back(block);
       
-      // Add block arguments for loop induction variables
-      block.addArgument(builder.getIndexType(), scopeLoc);
+      // add block argument(s)
+      block->addArgument(builder.getIndexType(), scopeLoc);
       
-      // 7. Set insertion point and emit body
-      mlir::OpBuilder::InsertionGuard guard(builder);
-      builder.setInsertionPointToEnd(&block);
+      // set insertion point to the start/end of the new block and emit body
+      builder.setInsertionPointToStart(block);
       
-      // Emit the loop body
+      auto savedIP = builder.saveInsertionPoint();
+
+      // Emit the loop body -> here is the PROBLEM when the vody is non-empty
       if (S.getBody()) {
         if (emitStmt(S.getBody(), /*useCurrentScope=*/false).failed())
-          loopRes = mlir::failure(); // Use loopRes instead of return
+         loopRes = mlir::failure(); // Use loopRes instead of return
+      //  emitStopPoint(&S);
       }
-      
-      
-      // 8. Add terminator
+      builder.restoreInsertionPoint(savedIP);
+      // 8. Add terminator -> I've moved below since seems more
       builder.create<mlir::omp::YieldOp>(getLoc(S.getEndLoc()));
-
-      // DEBUG: Print what we just created
-      /*
-      llvm::errs() << "=== Generated loop_nest ===\n";
-      loopNestOp.dump();
-      llvm::errs() << "=== End loop_nest ===\n";
-      */
 
     } else {  // isOMPFor == false
 
@@ -1154,15 +1162,6 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
                             res = forStmtBuilder();
                           });
 }
-
-  // that's a problem for the emission of omp.loop_nest since we do not want cir.scope in the way
-  // MOVED UP inside a if block for that reason
-  //cir::ScopeOp::create(builder, scopeLoc, /*scopeBuilder=*/
-  //                     [&](mlir::OpBuilder &b, mlir::Location loc) {
-  //                       LexicalScope lexScope{*this, loc,
-  //                                             builder.getInsertionBlock()};
-  //                       res = forStmtBuilder();
-  //                     });
 
   if (res.failed())
     return res;
