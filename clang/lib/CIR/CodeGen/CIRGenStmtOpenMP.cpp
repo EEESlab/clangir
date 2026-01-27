@@ -178,14 +178,26 @@ CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {   // pointer to 
     // Handle Upper Bound and inclusive
     if (FS->getCond()) {
         if (const auto *BO = dyn_cast<BinaryOperator>(FS->getCond())) {
-          // Get the RHS of the comparison as upper bound
-          // upperBound = emitScalarExpr(BO->getRHS()); not working since emit a cir.int that is not accepted by omp.loop_nest
-          // While it works evaluating RHS as a constant (same thing for LB and step)
-          if (const auto *IL = dyn_cast<IntegerLiteral>(BO->getRHS()->IgnoreImpCasts())) {
-            int64_t val = IL->getValue().getSExtValue();
-            upperBound = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, val);
-          } 
+          // 1. Evaluate the RHS (this could be 'b' or '10')
+          mlir::Value rawBound = emitScalarExpr(BO->getRHS());
+          // 2. CONVERT cir.int to mlir.index (which OpenMP dialect expects)
+          // You likely need to cast the CIR type to a standard MLIR type
+          if (rawBound) {
+            // 1. Correct way to cast Type in modern MLIR
+            auto cirIntType = mlir::dyn_cast<cir::IntType>(rawBound.getType());
+            if (cirIntType) {
+              // 1. Get the standard MLIR integer type (i32/i64)
+              mlir::Type stdIntTy = builder.getIntegerType(cirIntType.getWidth());
+              
+              // use Unrealized conversion cast to force the cast when type conflict
+              mlir::Value stdInt = builder.create<mlir::UnrealizedConversionCastOp>(
+                  scopeLoc, stdIntTy, rawBound).getResult(0);
 
+              // 3. Now convert standard i32 to index
+              upperBound = mlir::arith::IndexCastOp::create(
+                  builder, scopeLoc, builder.getIndexType(), stdInt);
+            }
+          }
           // Check if comparison is inclusive (<= or >=) or exclusive (< or >)
           BinaryOperatorKind opKind = BO->getOpcode();
           if (opKind == BO_LE || opKind == BO_GE) {
@@ -221,6 +233,10 @@ CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {   // pointer to 
       step = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, 1);
     }
   } 
+
+  llvm::errs() << "=== Generated wsloop operation ===\n";
+  upperBound.dump();
+  llvm::errs() << "=== End of wsloop ===\n";
 
   // populate a struct that will be passed to emitForStmt (loop_nest)
   currentOMPLoopBounds = LoopBounds{lowerBound, upperBound, step, inclusive};
