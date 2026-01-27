@@ -165,13 +165,23 @@ CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {   // pointer to 
   bool inclusive = false;
   
   if (FS) {
-    // Handle Lower Bound
+    // === 1. Handle Lower Bound (e.g., int i = start) ===
     if (const auto *DS = dyn_cast<DeclStmt>(FS->getInit())) {
-        if (const auto *VD = dyn_cast<VarDecl>(DS->getSingleDecl())) {
-            if (const auto *IL = dyn_cast<IntegerLiteral>(VD->getInit()->IgnoreImpCasts())) {
-                lowerBound = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, IL->getValue().getSExtValue());
+      if (const auto *VD = dyn_cast<VarDecl>(DS->getSingleDecl())) {
+        if (VD->hasInit()) {
+          mlir::Value rawLB = emitScalarExpr(VD->getInit());
+          if (rawLB) {
+            auto cirIntType = mlir::dyn_cast<cir::IntType>(rawLB.getType());
+            if (cirIntType) {
+              mlir::Type stdIntTy = builder.getIntegerType(cirIntType.getWidth());
+              mlir::Value stdInt = builder.create<mlir::UnrealizedConversionCastOp>(
+                  scopeLoc, stdIntTy, rawLB).getResult(0);
+              lowerBound = mlir::arith::IndexCastOp::create(
+                  builder, scopeLoc, builder.getIndexType(), stdInt);
             }
+          }
         }
+      }
     }
 
 
@@ -207,22 +217,33 @@ CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {   // pointer to 
       }
 
 
-    // 3. Get step from increment (e.g., i++, i+=2)
+    // === 3. Handle Step (e.g., i++, i += step) ===
     if (FS->getInc()) {
       if (const auto *UO = dyn_cast<UnaryOperator>(FS->getInc())) {
-        // i++ or ++i -> step = 1
-        if (UO->isIncrementOp()) {
-          step = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, 1);
-        } else if (UO->isDecrementOp()) {
-          // i-- or --i -> step = -1
-          step = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, -1);
-        }
+        int64_t val = UO->isIncrementOp() ? 1 : -1;
+        step = mlir::arith::ConstantIndexOp::create(builder, scopeLoc, val);
       } else if (const auto *BO = dyn_cast<BinaryOperator>(FS->getInc())) {
-        // i += step or i = i + step
-        if (BO->getOpcode() == BO_AddAssign || BO->getOpcode() == BO_Assign) {
-          if (const auto *IL = dyn_cast<IntegerLiteral>(BO->getRHS()->IgnoreImpCasts())) {
-            int64_t val = IL->getValue().getSExtValue();
-            step = builder.create<mlir::arith::ConstantIndexOp>(scopeLoc, val);
+        // Support i += step OR i = i + step
+        Expr *stepExpr = nullptr;
+        if (BO->isCompoundAssignmentOp()) {
+          stepExpr = BO->getRHS();
+        } else if (BO->isAssignmentOp()) {
+          if (auto *SubBO = dyn_cast<BinaryOperator>(BO->getRHS()->IgnoreImpCasts())) {
+            stepExpr = SubBO->getRHS();
+          }
+        }
+
+        if (stepExpr) {
+          mlir::Value rawStep = emitScalarExpr(stepExpr);
+          if (rawStep) {
+            auto cirIntType = mlir::dyn_cast<cir::IntType>(rawStep.getType());
+            if (cirIntType) {
+              mlir::Type stdIntTy = builder.getIntegerType(cirIntType.getWidth());
+              mlir::Value stdInt = builder.create<mlir::UnrealizedConversionCastOp>(
+                  scopeLoc, stdIntTy, rawStep).getResult(0);
+              step = mlir::arith::IndexCastOp::create(
+                  builder, scopeLoc, builder.getIndexType(), stdInt);
+            }
           }
         }
       }
