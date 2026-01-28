@@ -69,9 +69,8 @@ private:
   /// is where the next operations will be introduced.
   CIRGenBuilderTy &builder;
 
-  ///lucap: add private struct used by emitOMPForDirective to pass values to emitForStmt 
-  ///it's necessary for creating the structure wsloop { loop_nest ... {}}
-  /// State for OpenMP loop bounds when emitting OMP for directives
+  /// State used to communicate OpenMP loop bounds from `emitOMPForDirective`
+  /// to `emitForStmt`.
   struct LoopBounds {
     mlir::Value lowerBound;
     mlir::Value upperBound;

@@ -194,31 +194,29 @@ CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {
     if (const auto *declStmt = dyn_cast<DeclStmt>(forStmt->getInit())) {
       if (const auto *varDecl = dyn_cast<VarDecl>(declStmt->getSingleDecl())) {
         if (varDecl->hasInit()) {
-          mlir::Value rawLB = emitScalarExpr(varDecl->getInit());
-          if (rawLB) {
-            // CIR expressions typically produce cir.int types, but OpenMP
-            // loop bounds must be of type `index`.
+          // Try constant first
+          if (const auto *intLit = dyn_cast<IntegerLiteral>(varDecl->getInit()->IgnoreImpCasts())) {
+            lowerBound = mlir::arith::ConstantIndexOp::create(builder, scopeLoc, intLit->getValue().getSExtValue());
+          } else {   
+            // For non-constant bounds, emit as CIR value
+            mlir::Value rawLB = emitScalarExpr(varDecl->getInit());
+            // CIR expressions typically produce cir.int types, but OpenMP loop bounds must be of type `index`.
             auto cirIntType = mlir::dyn_cast<cir::IntType>(rawLB.getType());
-            if (cirIntType) {
-              // Convert cir.int -> builtin integer (i32/i64).
-              mlir::Type stdIntTy = builder.getIntegerType(cirIntType.getWidth());
-              
-              // UnrealizedConversionCast is used here as a temporary bridge
-              // between CIR types and standard MLIR types.
-              auto castOpLB =
-                  mlir::UnrealizedConversionCastOp::create(
-                      builder, scopeLoc,
-                      mlir::TypeRange{stdIntTy},
-                      mlir::ValueRange{rawLB});
+            // Convert cir.int -> builtin integer (i32/i64).
+            mlir::Type stdIntTy = builder.getIntegerType(cirIntType.getWidth());
+            
+            // UnrealizedConversionCast is used here as a temporary bridge between CIR types and standard MLIR types.
+            auto castOpLB =
+                mlir::UnrealizedConversionCastOp::create(
+                    builder, scopeLoc,
+                    mlir::TypeRange{stdIntTy},
+                    mlir::ValueRange{rawLB});
 
-              //mlir::Value stdInt = castOpLB.getResult(0);
-
-              // Convert builtin integer -> index.
-              lowerBound = mlir::arith::IndexCastOp::create(
-                  builder, scopeLoc,
-                  builder.getIndexType(),
-                  castOpLB.getResult(0));
-            }
+            // Convert builtin integer -> index.
+            lowerBound = mlir::arith::IndexCastOp::create(
+                builder, scopeLoc,
+                builder.getIndexType(),
+                castOpLB.getResult(0));
           }
         }
       }
@@ -235,31 +233,25 @@ CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {
     // determines whether the bound is inclusive.
     //===------------------------------------------------------------------===//
     if (forStmt->getCond()) {
-        if (const auto *binOp = dyn_cast<BinaryOperator>(forStmt->getCond())) {
-          // Evaluate the right-hand side of the comparison.
-          mlir::Value rawBound = emitScalarExpr(binOp->getRHS());
-          if (rawBound) {
+    if (const auto *binOp = dyn_cast<BinaryOperator>(forStmt->getCond())) {
+        // Try constant first
+        if (const auto *intLit = dyn_cast<IntegerLiteral>(binOp->getRHS()->IgnoreImpCasts())) {
+            int64_t boundVal = intLit->getValue().getSExtValue();
+            upperBound = mlir::arith::ConstantIndexOp::create(builder, scopeLoc, boundVal);
+        } else {
+            // For non-constant bounds, emit as CIR value
+            mlir::Value rawBound = emitScalarExpr(binOp->getRHS());
             auto cirIntType = mlir::dyn_cast<cir::IntType>(rawBound.getType());
-            if (cirIntType) {
-              mlir::Type stdIntTy = builder.getIntegerType(cirIntType.getWidth());
-              
-              auto castOpUB =
-                mlir::UnrealizedConversionCastOp::create(
-                    builder, scopeLoc,
-                    mlir::TypeRange{stdIntTy},
-                    mlir::ValueRange{rawBound});
-
-              upperBound = mlir::arith::IndexCastOp::create(
-                  builder, scopeLoc,
-                  builder.getIndexType(),
-                  castOpUB.getResult(0));
-              }
-          }
-          // Record whether the loop bound is inclusive (<= or >=).
-          BinaryOperatorKind opKind = binOp->getOpcode();
-          inclusive = (opKind == BO_LE || opKind == BO_GE);
+            mlir::Type stdIntTy = builder.getIntegerType(cirIntType.getWidth());
+            auto castOp = builder.create<mlir::UnrealizedConversionCastOp>(
+                scopeLoc, stdIntTy, rawBound);
+            upperBound = mlir::arith::IndexCastOp::create(
+                builder, scopeLoc, builder.getIndexType(), castOp.getResult(0));
         }
-      }
+        BinaryOperatorKind opKind = binOp->getOpcode();
+        inclusive = (opKind == BO_LE || opKind == BO_GE);
+    }
+}
 
 
     //===------------------------------------------------------------------===//
@@ -285,23 +277,24 @@ CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {
         }
 
         if (stepExpr) {
-          mlir::Value rawStep = emitScalarExpr(stepExpr);
-          if (rawStep) {
+          // Try constant first
+          if (const auto *intLit = dyn_cast<IntegerLiteral>(stepExpr->IgnoreImpCasts())) {
+            step = mlir::arith::ConstantIndexOp::create(builder, scopeLoc, intLit->getValue().getSExtValue());
+          } else {
+            mlir::Value rawStep = emitScalarExpr(stepExpr);
             auto cirIntType = mlir::dyn_cast<cir::IntType>(rawStep.getType());
-            if (cirIntType) {
-              mlir::Type stdIntTy = builder.getIntegerType(cirIntType.getWidth());
+            mlir::Type stdIntTy = builder.getIntegerType(cirIntType.getWidth());
 
-              auto castOpStep =
-                  mlir::UnrealizedConversionCastOp::create(
-                      builder, scopeLoc,
-                      mlir::TypeRange{stdIntTy},
-                      mlir::ValueRange{rawStep});
+            auto castOpStep =
+                mlir::UnrealizedConversionCastOp::create(
+                    builder, scopeLoc,
+                    mlir::TypeRange{stdIntTy},
+                    mlir::ValueRange{rawStep});
 
-              step = mlir::arith::IndexCastOp::create(
-                  builder, scopeLoc,
-                  builder.getIndexType(),
-                  castOpStep.getResult(0));
-            }
+            step = mlir::arith::IndexCastOp::create(
+                builder, scopeLoc,
+                builder.getIndexType(),
+                castOpStep.getResult(0));
           }
         }
       }
