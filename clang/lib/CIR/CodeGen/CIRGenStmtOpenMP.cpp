@@ -78,7 +78,7 @@ CIRGenFunction::emitOMPParallelDirective(const OMPParallelDirective &S) {
 
   mlir::LogicalResult res = mlir::success();
   auto scopeLoc = getLoc(S.getSourceRange());
-
+ 
   // Create a `omp.parallel` op.
   auto parallelOp = ParallelOp::create(builder, scopeLoc);
   mlir::Block &block = parallelOp.getRegion().emplaceBlock();
@@ -162,7 +162,6 @@ CIRGenFunction::emitOMPForDirective(const OMPForDirective &S) {
 
   // Source location used for all operations created for this directive.
   auto scopeLoc = getLoc(S.getSourceRange());
-  llvm::errs() << "DEBUG: creating omp.wsloop op\n";
 
   // OpenMP `for` directives wrap the associated loop inside a CapturedStmt.
   // Extract the underlying canonical `for` loop.

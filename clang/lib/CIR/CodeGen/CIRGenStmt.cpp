@@ -1027,36 +1027,26 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
   auto &astContext = getContext();//.getASTContext();
   auto &parentMapContext = astContext.getParentMapContext();
   auto parents = parentMapContext.getParents(S);
-;
-
-/**/
-  llvm::errs() << "=== DEBUG ForStmt ===\n";
   
   if (!parents.empty()) {
     // First expected parent is a CapturedDecl.
     if (const auto *captDecl = parents[0].get<CapturedDecl>()) {
-      llvm::errs() << "Parent is CapturedDecl\n";
       
       // CapturedDecls are not statements, so we must inspect who uses them.
       auto declParents = parentMapContext.getParents(*captDecl);
-      llvm::errs() << "CapturedDecl has " << declParents.size() << " parents\n";
       
       for (const auto &dp : declParents) {
         if (const auto *stmt = dp.get<clang::Stmt>()) {
-          llvm::errs() << "CapturedDecl parent Stmt: " << stmt->getStmtClassName() << "\n";
-          
+
           // Look for the CapturedStmt that wraps the loop.
           if (const auto *captStmt = dyn_cast<CapturedStmt>(stmt)) {
-            llvm::errs() << "Found CapturedStmt, checking its parents\n";
-            
+
             // Finally, check whether the CapturedStmt belongs to an OMPForDirective
             auto csParents = parentMapContext.getParents(*captStmt);
             for (const auto &csp : csParents) {
               if (const auto *parentStmt = csp.get<clang::Stmt>()) {
-                llvm::errs() << "CapturedStmt parent: " << parentStmt->getStmtClassName() << "\n";
                 
                 if (isa<OMPForDirective>(parentStmt)) {
-                  llvm::errs() << "*** FOUND OMPForDirective! ***\n";
                   isOMPFor = true;
                   break;
                 }
@@ -1068,10 +1058,6 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
     }
   }
   
-  llvm::errs() << "isOMPFor = " << isOMPFor << "\n";
-  llvm::errs() << "=== END DEBUG ===\n\n";
-  llvm::errs() << "DEBUG: Entering FOR STMT\n";
- 
    //===------------------------------------------------------------------===//
   // Shared builder lambda
   //
@@ -1103,7 +1089,7 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
     // OpenMP lowering path: emit `omp.loop_nest`
     //===--------------------------------------------------------------===//
     if(isOMPFor) {
-      llvm::errs() << "DEBUG: Entering OpenMP loop path (omp.loop_nest)\n";
+      //llvm::errs() << "DEBUG: Entering OpenMP loop path (omp.loop_nest)\n";
 
       mlir::OpBuilder::InsertionGuard guard(builder);
 
@@ -1157,7 +1143,7 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &S) {
     // Non-OpenMP lowering path: emit `cir.for`
     //===--------------------------------------------------------------===//
     else {
-      llvm::errs() << "DEBUG: Entering standard CIR loop path (cir.for)\n";
+      //llvm::errs() << "DEBUG: Entering standard CIR loop path (cir.for)\n";
 
       forOp = builder.createFor(
           getLoc(S.getSourceRange()),
