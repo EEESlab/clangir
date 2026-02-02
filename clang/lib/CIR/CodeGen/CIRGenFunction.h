@@ -2663,7 +2663,155 @@ public:
 
 private:
   QualType getVarArgType(const Expr *Arg);
+
+/// -------------------------------------
+/// start of OpenMP variable mapping utilities
+/// -------------------------------------
+/// The class used to assign some variables some temporarily addresses.
+class OMPMapVars {
+  DeclMapTy SavedLocals;
+  DeclMapTy SavedTempAddresses;
+  OMPMapVars(const OMPMapVars &) = delete;
+  void operator=(const OMPMapVars &) = delete;
+
+public:
+  explicit OMPMapVars() = default;
+  ~OMPMapVars() {
+    assert(SavedLocals.empty() && "Did not restored original addresses.");
+  };
+
+  /// Sets the address of the variable \p LocalVD to be \p TempAddr in
+  /// function \p CGF.
+  /// \return true if at least one variable was set already, false otherwise.
+  bool setVarAddr(CIRGenFunction &CGF, const VarDecl *LocalVD,
+                  Address TempAddr) {
+    LocalVD = LocalVD->getCanonicalDecl();
+    // Only save it once.
+    if (SavedLocals.count(LocalVD))
+      return false;
+
+    // Copy the existing local entry to SavedLocals.
+    auto it = CGF.LocalDeclMap.find(LocalVD);
+    if (it != CGF.LocalDeclMap.end())
+      SavedLocals.try_emplace(LocalVD, it->second);
+    else
+      SavedLocals.try_emplace(LocalVD, Address::invalid());
+
+    // Generate the private entry.
+    clang::QualType VarTy = LocalVD->getType();
+    if (VarTy->isReferenceType()) {
+      mlir::Location loc = CGF.getLoc(LocalVD->getLocation());
+      Address Temp = CGF.CreateMemTemp(VarTy, loc);
+      CGF.getBuilder().createStore(loc, TempAddr.emitRawPointer(), Temp);
+      TempAddr = Temp;
+    }
+    SavedTempAddresses.try_emplace(LocalVD, TempAddr);
+
+    return true;
+  }
+
+  /// Applies new addresses to the list of the variables.
+  /// \return true if at least one variable is using new address, false
+  /// otherwise.
+  bool apply(CIRGenFunction &CGF) {
+    copyInto(SavedTempAddresses, CGF.LocalDeclMap);
+    SavedTempAddresses.clear();
+    return !SavedLocals.empty();
+  }
+
+  /// Restores original addresses of the variables.
+  void restore(CIRGenFunction &CGF) {
+    if (!SavedLocals.empty()) {
+      copyInto(SavedLocals, CGF.LocalDeclMap);
+      SavedLocals.clear();
+    }
+  }
+
+private:
+  /// Copy all the entries in the source map over the corresponding
+  /// entries in the destination, which must exist.
+  static void copyInto(const DeclMapTy &Src, DeclMapTy &Dest) {
+    for (auto &[Decl, Addr] : Src) {
+      if (!Addr.isValid())
+        Dest.erase(Decl);
+      else
+        Dest.insert_or_assign(Decl, Addr);
+    }
+  }
 };
+
+/// The scope used to remap some variables as private in the OpenMP loop body
+/// (or other captured region emitted without outlining), and to restore old
+/// vars back on exit.
+class OMPPrivateScope : public RunCleanupsScope {
+  CIRGenFunction::OMPMapVars MappedVars;
+  OMPPrivateScope(const OMPPrivateScope &) = delete;
+  void operator=(const OMPPrivateScope &) = delete;
+
+public:
+  // Enter a new OpenMP private scope.
+  explicit OMPPrivateScope(CIRGenFunction &CGF) : RunCleanupsScope(CGF) {}
+
+  /// Registers \p LocalVD variable as a private with \p Addr as the address
+  /// of the corresponding private variable. \p
+  /// PrivateGen is the address of the generated private variable.
+  /// \return true if the variable is registered as private, false if it has
+  /// been privatized already.
+
+  bool addPrivate(const clang::VarDecl *LocalVD, Address Addr) {
+    assert(PerformCleanup && "adding private to dead scope");
+    return MappedVars.setVarAddr(CGF, LocalVD, Addr);
+  }
+
+  /// Privatizes local variables previously registered as private.
+  /// Registration is separate from the actual privatization to allow
+  /// initializers use values of the original variables, not the private one.
+  /// This is important, for example, if the private variable is a class
+  /// variable initialized by a constructor that references other private
+  /// variables. But at initialization original variables must be used, not
+  /// private copies.
+  /// \return true if at least one variable was privatized, false otherwise.
+  bool Privatize() { return MappedVars.apply(CGF); }
+
+  void ForceCleanup() {
+    RunCleanupsScope::ForceCleanup();
+    restoreMap();
+  }
+
+  /// Exit scope - all the mapped variables are restored.
+  ~OMPPrivateScope() {
+    if (PerformCleanup)
+      ForceCleanup();
+  }
+
+  /// Checks if the global variable is captured in current function.
+  bool isGlobalVarCaptured(const clang::VarDecl *VD) const {
+    VD = VD->getCanonicalDecl();
+    return !VD->isLocalVarDeclOrParm() && CGF.LocalDeclMap.count(VD) > 0;
+  }
+
+  /// Restore all mapped variables w/o clean up. This is usefully when we want
+  /// to reference the original variables but don't want the clean up because
+  /// that could emit lifetime end too early, causing backend issue #56913.
+  void restoreMap() { MappedVars.restore(CGF); }
+};  
+
+/// Save/restore original map of previously emitted local vars in case when we
+/// need to duplicate emission of the same code several times in the same
+/// function for OpenMP code.
+class OMPLocalDeclMapRAII {
+  CIRGenFunction &CGF;
+  DeclMapTy SavedMap;
+
+public:
+  OMPLocalDeclMapRAII(CIRGenFunction &CGF)
+      : CGF(CGF), SavedMap(CGF.LocalDeclMap) {}
+  ~OMPLocalDeclMapRAII() { SavedMap.swap(CGF.LocalDeclMap); }
+};
+
+
+}; // end of CIRGenFunction class
+
 
 /// Helper class with most of the code for saving a value for a
 /// conditional expression cleanup.
@@ -2781,7 +2929,8 @@ template <> struct DominatingValue<RValue> {
   }
   static type restore(CIRGenFunction &CGF, saved_type value) {
     return value.restore(CGF);
-  }
+  }  
+
 };
 
 } // namespace clang::CIRGen

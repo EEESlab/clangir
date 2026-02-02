@@ -80,6 +80,34 @@ CIRGenFunction::emitOMPParallelDirective(const OMPParallelDirective &S) {
       builder, scopeLoc, /*scopeBuilder=*/
       [&](mlir::OpBuilder &b, mlir::Location loc) {
         LexicalScope lexScope{*this, scopeLoc, builder.getInsertionBlock()};
+
+
+        // 1. Create a privacy scope. This helper is designed to 
+        // handle variable shadowing for OpenMP.
+        CIRGenFunction::OMPPrivateScope PrivateScope(*this);
+
+        // 1. Process Private Clauses
+        for (const auto *C : S.clauses()) {
+            if (C->getClauseKind() == llvm::omp::Clause::OMPC_private) {
+                auto *PC = cast<OMPPrivateClause>(C);
+                for (auto *Ref : PC->varlist()) {
+                    auto *DRE = cast<DeclRefExpr>(Ref);
+                    auto *VD = cast<VarDecl>(DRE->getDecl());
+
+                    // 2. Emit a new alloca for the private copy
+                    mlir::Type varTy = getTypes().convertType(VD->getType());
+                    // Use getLoc() to convert the Clang SourceLocation to an MLIR Location
+                    Address addr = CreateMemTemp(VD->getType(), getLoc(VD->getLocation()), VD->getName());
+                    
+                    // 3. Shadow the variable in the LocalDeclMap
+                    // This ensures emitStmt uses the new address for this scope
+                    setAddrOfLocalVar(VD, addr);
+                }
+            }
+        }
+
+
+
         // Emit the body of the region.
         if (emitStmt(S.getCapturedStmt(OpenMPDirectiveKind::OMPD_parallel)
                          ->getCapturedStmt(),
